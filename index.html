@@ -102,84 +102,94 @@ footer{text-align:center;font-size:10px;color:#63738a;padding:0 10px 20px}
 
 <footer>Radio Doble A 90.9 FM · La Radio Oficial del VRAE</footer>
 <script>
-const audio=document.getElementById('radio'),message=document.getElementById('message'),play=document.getElementById('playBtn'),topPlay=document.getElementById('topPlay');
-const audioSource=audio.querySelector('source');
-const streamUrl=audioSource.src;
-let userWantsAudio=false, pausedAt=0, retryTimer=null, waitingTimer=null, watchdogTimer=null, retryCount=0, reconnecting=false;
+let audio=document.getElementById('radio');
+const message=document.getElementById('message'),play=document.getElementById('playBtn'),topPlay=document.getElementById('topPlay');
+const streamUrl='https://uk7freenew.listen2myradio.com/live.mp3?typeportmount=s1_22798_stream_257615342';
+let userWantsAudio=false,retryTimer=null,connectionTimer=null,retryCount=0,connecting=false,hasPlayed=false,attemptId=0,lastProgressAt=Date.now(),lastCurrentTime=0;
 function say(t){message.textContent=t}
 function setPlayButtons(isPlaying){play.textContent=isPlaying?'Ⅱ':'▶';topPlay.textContent=isPlaying?'Ⅱ En vivo':'▶ Escuchar en vivo'}
-function clearRetry(){if(retryTimer){clearTimeout(retryTimer);retryTimer=null}if(waitingTimer){clearTimeout(waitingTimer);waitingTimer=null}if(watchdogTimer){clearTimeout(watchdogTimer);watchdogTimer=null}}
-function scheduleReconnect(reason){
- if(!userWantsAudio || retryTimer || document.hidden) return;
- clearTimeout(waitingTimer);waitingTimer=null;
- const delay=Math.min(30000,2000*Math.pow(2,Math.min(retryCount,4)));
- retryCount++;
- say(reason+' Intentando reconectar en '+Math.round(delay/1000)+' s…');
- retryTimer=setTimeout(()=>{retryTimer=null;reconnectStream(false)},delay);
+function clearConnectionTimers(){if(retryTimer){clearTimeout(retryTimer);retryTimer=null}if(connectionTimer){clearTimeout(connectionTimer);connectionTimer=null}}
+function scheduleReconnect(reason,immediate=false){
+  if(!userWantsAudio||retryTimer)return;
+  if(connectionTimer){clearTimeout(connectionTimer);connectionTimer=null}
+  const delays=[1500,3000,5000,8000,12000,20000,30000];
+  const delay=immediate?500:delays[Math.min(retryCount,delays.length-1)];
+  retryCount=Math.min(retryCount+1,delays.length-1);
+  say((navigator.onLine?reason:'Esperando que vuelva Internet.')+' Se intentará reconectar en '+Math.ceil(delay/1000)+' s…');
+  retryTimer=setTimeout(()=>{retryTimer=null;connectFresh(false)},delay);
 }
-async function reconnectStream(fromUser){
- if(!userWantsAudio && !fromUser) return;
- clearRetry();
- reconnecting=true;
- say('Solicitando una nueva conexión a la señal en vivo…');
- try{
-   audio.pause();
-   audioSource.src=streamUrl;
-   audio.load();
-   await audio.play();
-   // play() can resolve before the stream actually produces sound; verify that playback starts.
-   watchdogTimer=setTimeout(()=>{
-     watchdogTimer=null;
-     if(userWantsAudio && audio.paused===false && audio.readyState<3){
-       scheduleReconnect('La señal no terminó de cargar.');
-     }
-   },12000);
- }catch(e){
-   setPlayButtons(false);
-   if(userWantsAudio) scheduleReconnect('La conexión no respondió.');
-   else say('Pulsa Escuchar en vivo para iniciar la transmisión.');
- }finally{reconnecting=false}
+function attachAudioEvents(el){
+  el.addEventListener('playing',()=>{if(el!==audio)return;hasPlayed=true;retryCount=0;lastProgressAt=Date.now();lastCurrentTime=el.currentTime;clearConnectionTimers();connecting=false;setPlayButtons(true);say('Transmisión en vivo conectada.');document.getElementById('fallback').style.display='none'});
+  el.addEventListener('timeupdate',()=>{if(el!==audio)return;if(el.currentTime!==lastCurrentTime){lastCurrentTime=el.currentTime;lastProgressAt=Date.now()}});
+  el.addEventListener('waiting',()=>{if(el===audio&&userWantsAudio){say('La señal está cargando…');armConnectionWatchdog()}});
+  el.addEventListener('stalled',()=>{if(el===audio&&userWantsAudio){hasPlayed=false;scheduleReconnect('La conexión se quedó detenida.',false)}});
+  el.addEventListener('ended',()=>{if(el===audio&&userWantsAudio)scheduleReconnect('La transmisión terminó inesperadamente.',false)});
+  el.addEventListener('error',()=>{if(el!==audio)return;document.getElementById('fallback').style.display='block';if(userWantsAudio){hasPlayed=false;scheduleReconnect('No se recibió la señal.',false)}else say('No se pudo reproducir el audio. Pulsa reproducir para intentarlo nuevamente.')});
 }
-async function start(){
- userWantsAudio=true;
- const pausedFor=pausedAt?Date.now()-pausedAt:0;
- pausedAt=0;
- if(pausedFor>15000){await reconnectStream(true);return}
- say('Conectando con la señal de Radio Doble A…');
- try{
-   await audio.play();
-   watchdogTimer=setTimeout(()=>{
-     watchdogTimer=null;
-     if(userWantsAudio && audio.paused===false && audio.readyState<3) scheduleReconnect('La señal no terminó de cargar.');
-   },12000);
- }catch(e){setPlayButtons(false);if(userWantsAudio)scheduleReconnect('No se pudo iniciar la señal.');else say('No se pudo iniciar el audio. Comprueba tu conexión e inténtalo nuevamente.')}
+function makeFreshAudio(){
+  const old=audio;
+  const fresh=document.createElement('audio');
+  fresh.id='radio';fresh.preload='none';fresh.setAttribute('playsinline','');fresh.volume=Number(document.getElementById('volume').value||0.8);
+  const source=document.createElement('source');source.src=streamUrl;source.type='audio/mpeg';fresh.appendChild(source);
+  old.pause();old.replaceWith(fresh);audio=fresh;attachAudioEvents(audio);
+  lastProgressAt=Date.now();lastCurrentTime=0;
 }
-function pause(){userWantsAudio=false;pausedAt=Date.now();clearRetry();audio.pause();setPlayButtons(false);say('Reproducción pausada.')}
-function stop(){userWantsAudio=false;pausedAt=0;clearRetry();audio.pause();audioSource.src=streamUrl;audio.load();setPlayButtons(false);say('Reproducción detenida.')}
-play.addEventListener('click',()=>audio.paused?start():pause());topPlay.addEventListener('click',()=>audio.paused?start():pause());document.getElementById('stopBtn').addEventListener('click',stop);
-audio.addEventListener('playing',()=>{retryCount=0;clearRetry();setPlayButtons(true);say('Transmisión en vivo conectada.');document.getElementById('fallback').style.display='none'});
-audio.addEventListener('waiting',()=>{say('La señal está cargando…');if(userWantsAudio&&!waitingTimer&&!reconnecting)waitingTimer=setTimeout(()=>{waitingTimer=null;if(audio.paused===false)scheduleReconnect('La señal quedó detenida.');},18000)});
-audio.addEventListener('stalled',()=>{if(userWantsAudio)scheduleReconnect('La señal se interrumpió.')});
-audio.addEventListener('ended',()=>{if(userWantsAudio)scheduleReconnect('La transmisión terminó inesperadamente.')});
-audio.addEventListener('error',()=>{document.getElementById('fallback').style.display='block';if(userWantsAudio)scheduleReconnect('No se recibió la señal.');else say('No se pudo reproducir el audio directo. Puedes probar la página pública de escucha.')});
-document.addEventListener('visibilitychange',()=>{if(!document.hidden&&userWantsAudio&&(audio.paused||audio.readyState<3))scheduleReconnect('Retomando la conexión.');});
+function armConnectionWatchdog(){
+  if(connectionTimer)clearTimeout(connectionTimer);
+  connectionTimer=setTimeout(()=>{
+    connectionTimer=null;
+    if(!userWantsAudio)return;
+    if(!hasPlayed){scheduleReconnect('La señal tarda en responder.',false);return;}
+    if(audio.paused||audio.readyState<2||Date.now()-lastProgressAt>15000){hasPlayed=false;scheduleReconnect('La transmisión dejó de avanzar.',true);}
+    else armConnectionWatchdog();
+  },10000);
+}
+async function connectFresh(fromUser){
+  if(!userWantsAudio&&!fromUser)return;
+  if(connecting)return;
+  const thisAttempt=++attemptId;connecting=true;clearConnectionTimers();hasPlayed=false;setPlayButtons(false);
+  if(!navigator.onLine){say('Sin conexión a Internet. La radio seguirá intentando reconectarse…');connecting=false;scheduleReconnect('Esperando conexión.',false);return;}
+  say('Abriendo una conexión nueva con la señal en vivo…');
+  try{
+    // Reemplaza el elemento completo: descarta el estado interno de la conexión anterior.
+    makeFreshAudio();
+    const thisAudio=audio;
+    await new Promise(resolve=>setTimeout(resolve,300));
+    if(thisAttempt!==attemptId||!userWantsAudio)return;
+    thisAudio.load();
+    const playPromise=thisAudio.play();armConnectionWatchdog();await playPromise;
+  }catch(e){
+    if(thisAttempt===attemptId){setPlayButtons(false);if(userWantsAudio)scheduleReconnect('No se pudo iniciar la señal.',false);else say('Pulsa «Escuchar en vivo» para iniciar la transmisión.');}
+  }finally{if(thisAttempt===attemptId)connecting=false;}
+}
+function reconnectAfterNetworkChange(reason){
+  if(!userWantsAudio)return;clearConnectionTimers();connecting=false;attemptId++;
+  if(!navigator.onLine){hasPlayed=false;audio.pause();setPlayButtons(false);say('Sin conexión a Internet. La radio seguirá intentando reconectarse…');scheduleReconnect('Esperando conexión.',false);return;}
+  retryTimer=setTimeout(()=>{retryTimer=null;connectFresh(false)},500);say(reason+' Reconectando…');
+}
+function start(){userWantsAudio=true;connecting=false;connectFresh(true)}
+function pause(){userWantsAudio=false;attemptId++;connecting=false;clearConnectionTimers();audio.pause();setPlayButtons(false);say('Reproducción pausada.')}
+function stop(){userWantsAudio=false;attemptId++;connecting=false;clearConnectionTimers();audio.pause();audio.src='';audio.load();setPlayButtons(false);say('Reproducción detenida.')}
+attachAudioEvents(audio);
+play.addEventListener('click',()=>audio.paused?start():pause());
+topPlay.addEventListener('click',()=>audio.paused?start():pause());
+document.getElementById('stopBtn').addEventListener('click',stop);
+document.addEventListener('visibilitychange',()=>{if(!document.hidden&&userWantsAudio&&(audio.paused||!hasPlayed))reconnectAfterNetworkChange('Retomando la conexión.')});
+window.addEventListener('offline',()=>{if(userWantsAudio){clearConnectionTimers();connecting=false;attemptId++;audio.pause();hasPlayed=false;setPlayButtons(false);say('Sin cobertura de Internet. La radio intentará reconectarse cuando vuelva la señal.');scheduleReconnect('Esperando que vuelva la cobertura.',false)}});
+window.addEventListener('online',()=>{if(userWantsAudio)reconnectAfterNetworkChange('Internet volvió a estar disponible.')});
+const networkInfo=navigator.connection||navigator.mozConnection||navigator.webkitConnection;
+if(networkInfo&&networkInfo.addEventListener)networkInfo.addEventListener('change',()=>{if(userWantsAudio)reconnectAfterNetworkChange('Cambio de conexión detectado.')});
+setInterval(()=>{
+ if(!userWantsAudio||retryTimer||connecting)return;
+ if(!hasPlayed)scheduleReconnect(navigator.onLine?'Comprobando la señal.':'Esperando que vuelva la cobertura.',false);
+ else if(audio.paused||audio.readyState<2||Date.now()-lastProgressAt>20000){hasPlayed=false;scheduleReconnect('Se detectó una interrupción del audio.',true)}
+},5000);
 document.getElementById('volume').addEventListener('input',e=>audio.volume=Number(e.target.value));audio.volume=.8;
 document.getElementById('directTest').addEventListener('click',()=>window.open('https://radiodoblea909fm.radiostream321.com/','_blank','noopener'));
 function tick(){const n=new Date();document.getElementById('clock').textContent=new Intl.DateTimeFormat('es-PE',{timeZone:'America/Lima',hour:'2-digit',minute:'2-digit',second:'2-digit',hour12:false}).format(n);document.getElementById('date').textContent=new Intl.DateTimeFormat('es-PE',{timeZone:'America/Lima',weekday:'short',day:'numeric',month:'short',year:'numeric'}).format(n)}tick();setInterval(tick,1000);
-// Weather for Pichari: Open-Meteo provides current conditions without an API key.
 async function updateWeather(){
  const temp=document.getElementById('weatherTemp'),details=document.getElementById('weatherDetails');
- try{
-  const url='https://api.open-meteo.com/v1/forecast?latitude=-12.52&longitude=-73.83&current=temperature_2m,relative_humidity_2m,apparent_temperature&timezone=America%2FLima';
-  const response=await fetch(url,{cache:'no-store'});
-  if(!response.ok) throw new Error('weather unavailable');
-  const data=await response.json(),c=data.current;
-  if(!c || !Number.isFinite(c.temperature_2m)) throw new Error('invalid weather data');
-  temp.textContent=Math.round(c.temperature_2m)+'°C';
-  const apparent=Number.isFinite(c.apparent_temperature)?'Sensación '+Math.round(c.apparent_temperature)+'°C':'Sensación no disponible';
-  const humidity=Number.isFinite(c.relative_humidity_2m)?'Humedad '+Math.round(c.relative_humidity_2m)+'%':'Humedad no disponible';
-  details.textContent=apparent+' · '+humidity;
- }catch(e){temp.textContent='No disponible';details.textContent='No se pudieron actualizar los datos';}
+ try{const url='https://api.open-meteo.com/v1/forecast?latitude=-12.52&longitude=-73.83&current=temperature_2m,relative_humidity_2m,apparent_temperature&timezone=America%2FLima';const response=await fetch(url,{cache:'no-store'});if(!response.ok)throw new Error('weather unavailable');const data=await response.json(),c=data.current;if(!c||!Number.isFinite(c.temperature_2m))throw new Error('invalid weather data');temp.textContent=Math.round(c.temperature_2m)+'°C';const apparent=Number.isFinite(c.apparent_temperature)?'Sensación '+Math.round(c.apparent_temperature)+'°C':'Sensación no disponible';const humidity=Number.isFinite(c.relative_humidity_2m)?'Humedad '+Math.round(c.relative_humidity_2m)+'%':'Humedad no disponible';details.textContent=apparent+' · '+humidity;}catch(e){temp.textContent='No disponible';details.textContent='No se pudieron actualizar los datos';}
 }
 updateWeather();setInterval(updateWeather,10*60*1000);
 </script>
