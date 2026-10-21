@@ -66,7 +66,7 @@ footer{text-align:center;font-size:10px;color:#63738a;padding:0 10px 20px}
 <div class="actions"><button class="action" id="topPlay">▶ Escuchar en vivo</button><button class="action secondary" id="directTest">◇ Probar señal directa</button></div>
 <div class="info-grid">
 <div class="info"><small>Hora de Perú</small><strong id="clock">--:--:--</strong><span id="date">Fecha</span></div>
-<div class="info"><small>Temperatura · Pichari</small><strong style="color:#22e6d2">28°C</strong><span>Sensación 32°C · Humedad 62%</span></div>
+<div class="info"><small>Temperatura · Pichari</small><strong id="weatherTemp" style="color:#22e6d2">Consultando…</strong><span id="weatherDetails">Actualizando datos del tiempo</span></div>
 </div>
 </div>
 <div class="controls">
@@ -103,15 +103,85 @@ footer{text-align:center;font-size:10px;color:#63738a;padding:0 10px 20px}
 <footer>Radio Doble A 90.9 FM · La Radio Oficial del VRAE</footer>
 <script>
 const audio=document.getElementById('radio'),message=document.getElementById('message'),play=document.getElementById('playBtn'),topPlay=document.getElementById('topPlay');
+const audioSource=audio.querySelector('source');
+const streamUrl=audioSource.src;
+let userWantsAudio=false, pausedAt=0, retryTimer=null, waitingTimer=null, watchdogTimer=null, retryCount=0, reconnecting=false;
 function say(t){message.textContent=t}
-async function start(){say('Conectando con la señal de Radio Doble A…');try{await audio.play()}catch(e){say('No se pudo iniciar el audio desde esta conexión. Comprueba la URL de escucha directa de Listen2MyRadio.')}}
-function pause(){audio.pause();play.textContent='▶';topPlay.textContent='▶ Escuchar en vivo';say('Reproducción pausada.')}
-function stop(){audio.pause();audio.removeAttribute('src');audio.querySelector('source').src='https://uk7freenew.listen2myradio.com/live.mp3?typeportmount=s1_22798_stream_257615342';audio.load();play.textContent='▶';topPlay.textContent='▶ Escuchar en vivo';say('Reproducción detenida.')}
+function setPlayButtons(isPlaying){play.textContent=isPlaying?'Ⅱ':'▶';topPlay.textContent=isPlaying?'Ⅱ En vivo':'▶ Escuchar en vivo'}
+function clearRetry(){if(retryTimer){clearTimeout(retryTimer);retryTimer=null}if(waitingTimer){clearTimeout(waitingTimer);waitingTimer=null}if(watchdogTimer){clearTimeout(watchdogTimer);watchdogTimer=null}}
+function scheduleReconnect(reason){
+ if(!userWantsAudio || retryTimer || document.hidden) return;
+ clearTimeout(waitingTimer);waitingTimer=null;
+ const delay=Math.min(30000,2000*Math.pow(2,Math.min(retryCount,4)));
+ retryCount++;
+ say(reason+' Intentando reconectar en '+Math.round(delay/1000)+' s…');
+ retryTimer=setTimeout(()=>{retryTimer=null;reconnectStream(false)},delay);
+}
+async function reconnectStream(fromUser){
+ if(!userWantsAudio && !fromUser) return;
+ clearRetry();
+ reconnecting=true;
+ say('Solicitando una nueva conexión a la señal en vivo…');
+ try{
+   audio.pause();
+   audioSource.src=streamUrl;
+   audio.load();
+   await audio.play();
+   // play() can resolve before the stream actually produces sound; verify that playback starts.
+   watchdogTimer=setTimeout(()=>{
+     watchdogTimer=null;
+     if(userWantsAudio && audio.paused===false && audio.readyState<3){
+       scheduleReconnect('La señal no terminó de cargar.');
+     }
+   },12000);
+ }catch(e){
+   setPlayButtons(false);
+   if(userWantsAudio) scheduleReconnect('La conexión no respondió.');
+   else say('Pulsa Escuchar en vivo para iniciar la transmisión.');
+ }finally{reconnecting=false}
+}
+async function start(){
+ userWantsAudio=true;
+ const pausedFor=pausedAt?Date.now()-pausedAt:0;
+ pausedAt=0;
+ if(pausedFor>15000){await reconnectStream(true);return}
+ say('Conectando con la señal de Radio Doble A…');
+ try{
+   await audio.play();
+   watchdogTimer=setTimeout(()=>{
+     watchdogTimer=null;
+     if(userWantsAudio && audio.paused===false && audio.readyState<3) scheduleReconnect('La señal no terminó de cargar.');
+   },12000);
+ }catch(e){setPlayButtons(false);if(userWantsAudio)scheduleReconnect('No se pudo iniciar la señal.');else say('No se pudo iniciar el audio. Comprueba tu conexión e inténtalo nuevamente.')}
+}
+function pause(){userWantsAudio=false;pausedAt=Date.now();clearRetry();audio.pause();setPlayButtons(false);say('Reproducción pausada.')}
+function stop(){userWantsAudio=false;pausedAt=0;clearRetry();audio.pause();audioSource.src=streamUrl;audio.load();setPlayButtons(false);say('Reproducción detenida.')}
 play.addEventListener('click',()=>audio.paused?start():pause());topPlay.addEventListener('click',()=>audio.paused?start():pause());document.getElementById('stopBtn').addEventListener('click',stop);
-audio.addEventListener('playing',()=>{play.textContent='Ⅱ';topPlay.textContent='Ⅱ En vivo';say('Transmisión en vivo conectada.')});audio.addEventListener('waiting',()=>say('Cargando la señal…'));audio.addEventListener('error',()=>{say('No se pudo reproducir el audio directo en este navegador. Usa la página pública de escucha.');document.getElementById('fallback').style.display='block';});
+audio.addEventListener('playing',()=>{retryCount=0;clearRetry();setPlayButtons(true);say('Transmisión en vivo conectada.');document.getElementById('fallback').style.display='none'});
+audio.addEventListener('waiting',()=>{say('La señal está cargando…');if(userWantsAudio&&!waitingTimer&&!reconnecting)waitingTimer=setTimeout(()=>{waitingTimer=null;if(audio.paused===false)scheduleReconnect('La señal quedó detenida.');},18000)});
+audio.addEventListener('stalled',()=>{if(userWantsAudio)scheduleReconnect('La señal se interrumpió.')});
+audio.addEventListener('ended',()=>{if(userWantsAudio)scheduleReconnect('La transmisión terminó inesperadamente.')});
+audio.addEventListener('error',()=>{document.getElementById('fallback').style.display='block';if(userWantsAudio)scheduleReconnect('No se recibió la señal.');else say('No se pudo reproducir el audio directo. Puedes probar la página pública de escucha.')});
+document.addEventListener('visibilitychange',()=>{if(!document.hidden&&userWantsAudio&&(audio.paused||audio.readyState<3))scheduleReconnect('Retomando la conexión.');});
 document.getElementById('volume').addEventListener('input',e=>audio.volume=Number(e.target.value));audio.volume=.8;
 document.getElementById('directTest').addEventListener('click',()=>window.open('https://radiodoblea909fm.radiostream321.com/','_blank','noopener'));
 function tick(){const n=new Date();document.getElementById('clock').textContent=new Intl.DateTimeFormat('es-PE',{timeZone:'America/Lima',hour:'2-digit',minute:'2-digit',second:'2-digit',hour12:false}).format(n);document.getElementById('date').textContent=new Intl.DateTimeFormat('es-PE',{timeZone:'America/Lima',weekday:'short',day:'numeric',month:'short',year:'numeric'}).format(n)}tick();setInterval(tick,1000);
+// Weather for Pichari: Open-Meteo provides current conditions without an API key.
+async function updateWeather(){
+ const temp=document.getElementById('weatherTemp'),details=document.getElementById('weatherDetails');
+ try{
+  const url='https://api.open-meteo.com/v1/forecast?latitude=-12.52&longitude=-73.83&current=temperature_2m,relative_humidity_2m,apparent_temperature&timezone=America%2FLima';
+  const response=await fetch(url,{cache:'no-store'});
+  if(!response.ok) throw new Error('weather unavailable');
+  const data=await response.json(),c=data.current;
+  if(!c || !Number.isFinite(c.temperature_2m)) throw new Error('invalid weather data');
+  temp.textContent=Math.round(c.temperature_2m)+'°C';
+  const apparent=Number.isFinite(c.apparent_temperature)?'Sensación '+Math.round(c.apparent_temperature)+'°C':'Sensación no disponible';
+  const humidity=Number.isFinite(c.relative_humidity_2m)?'Humedad '+Math.round(c.relative_humidity_2m)+'%':'Humedad no disponible';
+  details.textContent=apparent+' · '+humidity;
+ }catch(e){temp.textContent='No disponible';details.textContent='No se pudieron actualizar los datos';}
+}
+updateWeather();setInterval(updateWeather,10*60*1000);
 </script>
 <script>
 (function(){
